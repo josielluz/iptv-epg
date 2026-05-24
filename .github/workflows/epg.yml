@@ -1,1 +1,365 @@
+name: Generate EPG
 
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+
+  epg:
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 120
+
+    steps:
+
+      # =========================================================
+      # CHECKOUT
+      # =========================================================
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # =========================================================
+      # INSTALL DOTNET
+      # =========================================================
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      # =========================================================
+      # INSTALL DEPENDENCIES
+      # =========================================================
+
+      - name: Install Dependencies
+        run: |
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            wget \
+            gzip \
+            tar \
+            unzip \
+            curl \
+            ca-certificates \
+            python3
+
+      # =========================================================
+      # DOWNLOAD WEBGRAB+PLUS
+      # =========================================================
+
+      - name: Download WebGrab+Plus
+        run: |
+
+          rm -rf webgrabplus
+
+          mkdir -p webgrabplus
+
+          cd webgrabplus
+
+          echo ""
+          echo "======================================="
+          echo "DOWNLOADING WEBGRAB+PLUS"
+          echo "======================================="
+
+          wget -O wg.tar.gz \
+            https://webgrabplus.com/sites/default/files/download/sw/v5.1.5/WebGrabPlus_V5.1.5_beta_install.tar.gz
+
+          echo ""
+          echo "======================================="
+          echo "EXTRACTING"
+          echo "======================================="
+
+          tar -xzf wg.tar.gz
+
+          echo ""
+          echo "======================================="
+          echo "FILES"
+          echo "======================================="
+
+          find . -type f | head -100
+
+          DLL=$(find . -iname "WebGrab+Plus.dll" | head -1)
+
+          echo ""
+          echo "DLL FOUND: $DLL"
+
+          if [ -z "$DLL" ]; then
+
+            echo "ERRO: WebGrab+Plus.dll não encontrada"
+
+            exit 1
+
+          fi
+
+      # =========================================================
+      # CLONE SITEINIPACK
+      # =========================================================
+
+      - name: Clone SiteIniPack
+        run: |
+
+          rm -rf siteini.pack
+
+          git clone --depth=1 \
+            https://github.com/SilentButeo2/webgrabplus-siteinipack.git \
+            siteini.pack
+
+      # =========================================================
+      # CREATE OUTPUT
+      # =========================================================
+
+      - name: Create Output Directory
+        run: |
+
+          mkdir -p output
+
+      # =========================================================
+      # VALIDATE CHANNELS
+      # =========================================================
+
+      - name: Validate Channels
+        run: |
+
+          if [ ! -f channels/merged.channels.xml ]; then
+
+            echo "Arquivo channels/merged.channels.xml não encontrado"
+
+            exit 1
+
+          fi
+
+      # =========================================================
+      # CREATE CONFIG
+      # =========================================================
+
+      - name: Create WebGrab Config
+        run: |
+
+          cat > webgrabplus/WebGrab++.config.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+
+          <settings>
+
+            <filename>../output/guide.xml</filename>
+
+            <mode>n</mode>
+
+            <logging>on</logging>
+
+            <retry time-out="5">4</retry>
+
+            <timespan>1</timespan>
+
+            <update>i</update>
+
+            <skip>noskip</skip>
+
+            <user-agent>Mozilla/5.0</user-agent>
+
+            <channels>
+          EOF
+
+      # =========================================================
+      # APPEND CHANNELS
+      # =========================================================
+
+      - name: Append Channels
+        run: |
+
+          python3 << 'EOF'
+
+          import xml.etree.ElementTree as ET
+
+          tree = ET.parse('channels/merged.channels.xml')
+
+          root = tree.getroot()
+
+          lines = []
+
+          for channel in root.findall('channel'):
+
+              site = channel.attrib.get('site', '').strip()
+              site_id = channel.attrib.get('site_id', '').strip()
+              xmltv_id = channel.attrib.get('xmltv_id', '').strip()
+
+              name = (channel.text or xmltv_id).strip()
+
+              if not site:
+                  continue
+
+              line = (
+                  f'    <channel update="i" '
+                  f'site="{site}" '
+                  f'site_id="{site_id}" '
+                  f'xmltv_id="{xmltv_id}">'
+                  f'{name}</channel>'
+              )
+
+              lines.append(line)
+
+          if not lines:
+              raise Exception("Nenhum canal válido encontrado")
+
+          with open('webgrabplus/channels.txt', 'w', encoding='utf-8') as f:
+
+              f.write('\n'.join(lines))
+
+          print(f'Canais processados: {len(lines)}')
+
+          EOF
+
+          cat webgrabplus/channels.txt >> webgrabplus/WebGrab++.config.xml
+
+      # =========================================================
+      # CLOSE CONFIG
+      # =========================================================
+
+      - name: Close Config
+        run: |
+
+          cat >> webgrabplus/WebGrab++.config.xml << 'EOF'
+
+            </channels>
+
+          </settings>
+          EOF
+
+      # =========================================================
+      # COPY SITEINI
+      # =========================================================
+
+      - name: Copy SiteIni Files
+        run: |
+
+          mkdir -p webgrabplus/siteini.pack
+
+          cp -rf siteini.pack/siteini.pack/* \
+            webgrabplus/siteini.pack/
+
+      # =========================================================
+      # DEBUG
+      # =========================================================
+
+      - name: Debug Files
+        run: |
+
+          echo ""
+          echo "======================================="
+          echo "WEBGRAB FILES"
+          echo "======================================="
+
+          find webgrabplus -type f | head -100
+
+      # =========================================================
+      # RUN WEBGRAB+PLUS
+      # =========================================================
+
+      - name: Run WebGrab+Plus
+        run: |
+
+          cd webgrabplus
+
+          DLL=$(find . -iname "WebGrab+Plus.dll" | head -1)
+
+          echo ""
+          echo "======================================="
+          echo "RUNNING WEBGRAB+PLUS"
+          echo "======================================="
+
+          echo "DLL: $DLL"
+
+          dotnet "$DLL"
+
+          EXIT_CODE=$?
+
+          echo ""
+          echo "======================================="
+          echo "FINISHED"
+          echo "======================================="
+
+          echo "Exit Code: $EXIT_CODE"
+
+          ls -lah ../output || true
+
+          exit 0
+
+      # =========================================================
+      # VALIDATE GUIDE
+      # =========================================================
+
+      - name: Validate Guide
+        run: |
+
+          if [ ! -f output/guide.xml ]; then
+
+            echo "guide.xml não encontrado"
+
+            ls -lah output || true
+
+            exit 1
+
+          fi
+
+          if [ ! -s output/guide.xml ]; then
+
+            echo "guide.xml vazio"
+
+            exit 1
+
+          fi
+
+          CHANNELS=$(grep -c "<channel" output/guide.xml || true)
+          PROGRAMMES=$(grep -c "<programme" output/guide.xml || true)
+
+          echo "Canais: $CHANNELS"
+          echo "Programas: $PROGRAMMES"
+
+      # =========================================================
+      # COMPRESS
+      # =========================================================
+
+      - name: Compress Guide
+        run: |
+
+          gzip -fk output/guide.xml
+
+      # =========================================================
+      # UPLOAD ARTIFACT
+      # =========================================================
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: epg
+          path: |
+            output/guide.xml
+            output/guide.xml.gz
+
+      # =========================================================
+      # COMMIT
+      # =========================================================
+
+      - name: Commit Generated Files
+        run: |
+
+          git config --global user.name "github-actions"
+
+          git config --global user.email "actions@github.com"
+
+          git add output/guide.xml || true
+          git add output/guide.xml.gz || true
+
+          git diff --cached --quiet && exit 0
+
+          git commit -m "Automatic EPG update"
+
+          git push
