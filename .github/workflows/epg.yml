@@ -1,365 +1,347 @@
-name: Generate EPG
+name: Generate IPTV EPG
 
 on:
+  workflow_dispatch:
+
   schedule:
     - cron: "0 */6 * * *"
-  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-
   epg:
-
     runs-on: ubuntu-latest
 
-    timeout-minutes: 120
+    timeout-minutes: 60
 
     steps:
 
       # =========================================================
       # CHECKOUT
       # =========================================================
-
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       # =========================================================
-      # INSTALL DOTNET
+      # NODE.JS
       # =========================================================
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          dotnet-version: "8.0.x"
+          node-version: 20
 
       # =========================================================
-      # INSTALL DEPENDENCIES
+      # PYTHON
       # =========================================================
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Install Dependencies
+      # =========================================================
+      # INSTALL SYSTEM DEPENDENCIES
+      # =========================================================
+      - name: Install System Dependencies
         run: |
+          sudo apt update
 
-          sudo apt-get update
-
-          sudo apt-get install -y \
-            wget \
+          sudo apt install -y \
+            git \
             gzip \
-            tar \
-            unzip \
+            jq \
             curl \
-            ca-certificates \
-            python3
+            wget \
+            xmlstarlet
 
       # =========================================================
-      # DOWNLOAD WEBGRAB+PLUS
+      # CLONE IPTV-ORG EPG
       # =========================================================
-
-      - name: Download WebGrab+Plus
+      - name: Clone IPTV-ORG EPG
         run: |
-
-          rm -rf webgrabplus
-
-          mkdir -p webgrabplus
-
-          cd webgrabplus
-
-          echo ""
-          echo "======================================="
-          echo "DOWNLOADING WEBGRAB+PLUS"
-          echo "======================================="
-
-          wget -O wg.tar.gz \
-            https://webgrabplus.com/sites/default/files/download/sw/v5.1.5/WebGrabPlus_V5.1.5_beta_install.tar.gz
-
-          echo ""
-          echo "======================================="
-          echo "EXTRACTING"
-          echo "======================================="
-
-          tar -xzf wg.tar.gz
-
-          echo ""
-          echo "======================================="
-          echo "FILES"
-          echo "======================================="
-
-          find . -type f | head -100
-
-          DLL=$(find . -iname "WebGrab+Plus.dll" | head -1)
-
-          echo ""
-          echo "DLL FOUND: $DLL"
-
-          if [ -z "$DLL" ]; then
-
-            echo "ERRO: WebGrab+Plus.dll não encontrada"
-
-            exit 1
-
-          fi
-
-      # =========================================================
-      # CLONE SITEINIPACK
-      # =========================================================
-
-      - name: Clone SiteIniPack
-        run: |
-
-          rm -rf siteini.pack
+          rm -rf epg
 
           git clone --depth=1 \
-            https://github.com/SilentButeo2/webgrabplus-siteinipack.git \
-            siteini.pack
+            https://github.com/iptv-org/epg.git
 
       # =========================================================
-      # CREATE OUTPUT
+      # INSTALL NPM DEPENDENCIES
       # =========================================================
-
-      - name: Create Output Directory
+      - name: Install EPG Dependencies
         run: |
+          cd epg
 
+          npm install
+
+      # =========================================================
+      # CREATE REQUIRED FOLDERS
+      # =========================================================
+      - name: Create Required Folders
+        run: |
           mkdir -p output
+          mkdir -p epg/sites/custom
+          mkdir -p logs
 
       # =========================================================
-      # VALIDATE CHANNELS
+      # VALIDATE XML EXISTS
       # =========================================================
-
-      - name: Validate Channels
+      - name: Validate XML File Exists
         run: |
 
           if [ ! -f channels/merged.channels.xml ]; then
-
-            echo "Arquivo channels/merged.channels.xml não encontrado"
-
+            echo "ERRO: channels/merged.channels.xml não encontrado"
             exit 1
-
           fi
 
       # =========================================================
-      # CREATE CONFIG
+      # FIX XML FORMAT
       # =========================================================
-
-      - name: Create WebGrab Config
+      - name: Normalize XML
         run: |
-
-          cat > webgrabplus/WebGrab++.config.xml << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-
-          <settings>
-
-            <filename>../output/guide.xml</filename>
-
-            <mode>n</mode>
-
-            <logging>on</logging>
-
-            <retry time-out="5">4</retry>
-
-            <timespan>1</timespan>
-
-            <update>i</update>
-
-            <skip>noskip</skip>
-
-            <user-agent>Mozilla/5.0</user-agent>
-
-            <channels>
-          EOF
-
-      # =========================================================
-      # APPEND CHANNELS
-      # =========================================================
-
-      - name: Append Channels
-        run: |
-
           python3 << 'EOF'
 
           import xml.etree.ElementTree as ET
 
-          tree = ET.parse('channels/merged.channels.xml')
+          xml_file = 'channels/merged.channels.xml'
 
-          root = tree.getroot()
+          try:
+              tree = ET.parse(xml_file)
+              root = tree.getroot()
 
-          lines = []
+              if root.tag != 'channels':
+                  raise Exception('Root inválido')
 
-          for channel in root.findall('channel'):
-
-              site = channel.attrib.get('site', '').strip()
-              site_id = channel.attrib.get('site_id', '').strip()
-              xmltv_id = channel.attrib.get('xmltv_id', '').strip()
-
-              name = (channel.text or xmltv_id).strip()
-
-              if not site:
-                  continue
-
-              line = (
-                  f'    <channel update="i" '
-                  f'site="{site}" '
-                  f'site_id="{site_id}" '
-                  f'xmltv_id="{xmltv_id}">'
-                  f'{name}</channel>'
+              tree.write(
+                  xml_file,
+                  encoding='utf-8',
+                  xml_declaration=True
               )
 
-              lines.append(line)
+              print('XML validado com sucesso')
 
-          if not lines:
-              raise Exception("Nenhum canal válido encontrado")
-
-          with open('webgrabplus/channels.txt', 'w', encoding='utf-8') as f:
-
-              f.write('\n'.join(lines))
-
-          print(f'Canais processados: {len(lines)}')
+          except Exception as e:
+              print(f'ERRO XML: {e}')
+              exit(1)
 
           EOF
 
-          cat webgrabplus/channels.txt >> webgrabplus/WebGrab++.config.xml
-
       # =========================================================
-      # CLOSE CONFIG
+      # COPY CHANNELS
       # =========================================================
-
-      - name: Close Config
+      - name: Copy Channels XML
         run: |
+          cp channels/merged.channels.xml \
+             epg/sites/custom/channels.xml
 
-          cat >> webgrabplus/WebGrab++.config.xml << 'EOF'
+      # =========================================================
+      # REMOVE DUPLICATES
+      # =========================================================
+      - name: Remove Duplicate Channels
+        run: |
+          python3 << 'EOF'
 
-            </channels>
+          import xml.etree.ElementTree as ET
 
-          </settings>
+          file = 'epg/sites/custom/channels.xml'
+
+          tree = ET.parse(file)
+          root = tree.getroot()
+
+          seen = set()
+          removed = 0
+
+          for ch in list(root.findall('channel')):
+
+              key = (
+                  ch.attrib.get('site', ''),
+                  ch.attrib.get('site_id', ''),
+                  ch.attrib.get('xmltv_id', '')
+              )
+
+              if key in seen:
+                  root.remove(ch)
+                  removed += 1
+              else:
+                  seen.add(key)
+
+          tree.write(
+              file,
+              encoding='utf-8',
+              xml_declaration=True
+          )
+
+          print(f'Duplicados removidos: {removed}')
+
           EOF
 
       # =========================================================
-      # COPY SITEINI
+      # FILTER INVALID PROVIDERS
       # =========================================================
+      - name: Remove Invalid Providers
+        run: |
+          python3 << 'EOF'
 
-      - name: Copy SiteIni Files
+          import os
+          import xml.etree.ElementTree as ET
+
+          xml_file = 'epg/sites/custom/channels.xml'
+
+          tree = ET.parse(xml_file)
+          root = tree.getroot()
+
+          valid_sites = set()
+
+          for item in os.listdir('epg/sites'):
+              path = os.path.join('epg/sites', item)
+
+              if os.path.isdir(path):
+                  valid_sites.add(item)
+
+          removed = 0
+
+          for channel in list(root.findall('channel')):
+
+              site = channel.attrib.get('site')
+
+              if site not in valid_sites:
+                  root.remove(channel)
+                  removed += 1
+
+          tree.write(
+              xml_file,
+              encoding='utf-8',
+              xml_declaration=True
+          )
+
+          print(f'Providers inválidos removidos: {removed}')
+
+          EOF
+
+      # =========================================================
+      # VALIDATE CHANNEL COUNT
+      # =========================================================
+      - name: Validate Channel Count
         run: |
 
-          mkdir -p webgrabplus/siteini.pack
+          TOTAL=$(grep -c "<channel" epg/sites/custom/channels.xml || true)
 
-          cp -rf siteini.pack/siteini.pack/* \
-            webgrabplus/siteini.pack/
+          echo "TOTAL DE CANAIS: $TOTAL"
 
-      # =========================================================
-      # DEBUG
-      # =========================================================
-
-      - name: Debug Files
-        run: |
-
-          echo ""
-          echo "======================================="
-          echo "WEBGRAB FILES"
-          echo "======================================="
-
-          find webgrabplus -type f | head -100
-
-      # =========================================================
-      # RUN WEBGRAB+PLUS
-      # =========================================================
-
-      - name: Run WebGrab+Plus
-        run: |
-
-          cd webgrabplus
-
-          DLL=$(find . -iname "WebGrab+Plus.dll" | head -1)
-
-          echo ""
-          echo "======================================="
-          echo "RUNNING WEBGRAB+PLUS"
-          echo "======================================="
-
-          echo "DLL: $DLL"
-
-          dotnet "$DLL"
-
-          EXIT_CODE=$?
-
-          echo ""
-          echo "======================================="
-          echo "FINISHED"
-          echo "======================================="
-
-          echo "Exit Code: $EXIT_CODE"
-
-          ls -lah ../output || true
-
-          exit 0
-
-      # =========================================================
-      # VALIDATE GUIDE
-      # =========================================================
-
-      - name: Validate Guide
-        run: |
-
-          if [ ! -f output/guide.xml ]; then
-
-            echo "guide.xml não encontrado"
-
-            ls -lah output || true
-
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "ERRO: nenhum canal válido encontrado"
             exit 1
-
           fi
+
+      # =========================================================
+      # SHOW CHANNELS
+      # =========================================================
+      - name: Debug Channels
+        run: |
+          cat epg/sites/custom/channels.xml
+
+      # =========================================================
+      # GENERATE EPG
+      # =========================================================
+      - name: Generate EPG
+        run: |
+
+          cd epg
+
+          npm run grab -- \
+            --channels=./sites/custom/channels.xml \
+            --output=../output/guide.xml \
+            --days=3 \
+            --timeout=120000 \
+            --maxConnections=1 \
+            --gzip=false \
+            --debug || true
+
+      # =========================================================
+      # SHOW LOG FILES
+      # =========================================================
+      - name: Show Logs
+        run: |
+
+          echo "===== LOG FILES ====="
+
+          find epg -name "*.log" -exec cat {} \; || true
+
+      # =========================================================
+      # VERIFY OUTPUT
+      # =========================================================
+      - name: Verify Output
+        run: |
+
+          echo "===== OUTPUT ====="
+
+          ls -lah output || true
 
           if [ ! -s output/guide.xml ]; then
+            echo "ERRO: guide.xml não foi gerado"
 
-            echo "guide.xml vazio"
+            echo "===== DEBUG ====="
+
+            find epg -name "*.log" -exec cat {} \; || true
 
             exit 1
-
           fi
 
-          CHANNELS=$(grep -c "<channel" output/guide.xml || true)
-          PROGRAMMES=$(grep -c "<programme" output/guide.xml || true)
+      # =========================================================
+      # VALIDATE XML OUTPUT
+      # =========================================================
+      - name: Validate Generated XML
+        run: |
 
-          echo "Canais: $CHANNELS"
-          echo "Programas: $PROGRAMMES"
+          xmlstarlet val output/guide.xml || true
 
       # =========================================================
-      # COMPRESS
+      # COMPRESS XML
       # =========================================================
-
-      - name: Compress Guide
+      - name: Compress XML
         run: |
 
           gzip -fk output/guide.xml
 
       # =========================================================
-      # UPLOAD ARTIFACT
+      # MOVE FINAL FILES
       # =========================================================
+      - name: Move Final Files
+        run: |
 
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: epg
-          path: |
-            output/guide.xml
-            output/guide.xml.gz
+          cp output/guide.xml ./guide.xml
+
+          cp output/guide.xml.gz ./guide.xml.gz
+
+      # =========================================================
+      # GIT STATUS
+      # =========================================================
+      - name: Git Status
+        run: |
+
+          git status
 
       # =========================================================
       # COMMIT
       # =========================================================
-
-      - name: Commit Generated Files
+      - name: Commit Files
         run: |
 
-          git config --global user.name "github-actions"
+          git config --global user.name \
+            "github-actions[bot]"
 
-          git config --global user.email "actions@github.com"
+          git config --global user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add output/guide.xml || true
-          git add output/guide.xml.gz || true
+          git add guide.xml
+          git add guide.xml.gz
 
-          git diff --cached --quiet && exit 0
+          git commit -m "Auto Update EPG" || \
+            echo "Nenhuma alteração"
 
-          git commit -m "Automatic EPG update"
+      # =========================================================
+      # PUSH
+      # =========================================================
+      - name: Push Files
+        run: |
 
           git push
